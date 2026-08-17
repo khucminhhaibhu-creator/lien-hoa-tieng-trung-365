@@ -1,6 +1,14 @@
 export default async function handler(req, res) {
-  const allowedOrigin = 'https://khucminhhaibhu-creator.github.io';
-  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+  const origin = req.headers.origin || '';
+  const allowedOrigins = new Set([
+    'https://khucminhhaibhu-creator.github.io',
+    'https://lien-hoa-tieng-trung-365.vercel.app'
+  ]);
+
+  if (allowedOrigins.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Cache-Control', 'no-store');
@@ -14,21 +22,26 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { message, history = [] } = req.body || {};
-    if (!message || typeof message !== 'string') {
+    const body = req.body || {};
+    const message = typeof body.message === 'string' ? body.message.trim() : '';
+    const history = Array.isArray(body.history) ? body.history : [];
+
+    if (!message) {
       return res.status(400).json({ error: 'Thiếu message.' });
     }
 
-    const safeHistory = Array.isArray(history) ? history.slice(-12) : [];
-    const contents = safeHistory
-      .filter(item => item && item.text)
-      .map(item => ({
-        role: item.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: String(item.text) }]
-      }));
+    // Build a clean multi-turn transcript. The browser sends history without
+    // the current message, so the current question is added exactly once.
+    const safeHistory = history
+      .filter(item => item && typeof item.text === 'string' && item.text.trim())
+      .slice(-12);
 
-    // Always end the request with the student's current question.
-    contents.push({ role: 'user', parts: [{ text: message }] });
+    const transcript = safeHistory.length
+      ? safeHistory.map(item => {
+          const role = item.role === 'assistant' ? 'AI Giáo viên' : 'Học viên';
+          return `${role}: ${item.text.trim()}`;
+        }).join('\n') + `\nHọc viên: ${message}`
+      : `Học viên: ${message}`;
 
     const systemInstruction = `Bạn là AI Giáo viên tiếng Trung của Liên Hoa Global Education.
 Bạn đang dạy tiếng Trung giao tiếp cho học viên Việt Nam.
@@ -38,13 +51,15 @@ Nếu học viên viết tiếng Việt: dịch sang tiếng Trung tự nhiên, 
 Nếu học viên viết tiếng Trung: sửa câu, chỉ ra lỗi, đưa câu tự nhiên hơn, pinyin và nghĩa tiếng Việt.
 Nếu học viên nói về tên, tuổi, công việc, gia đình hoặc đời sống: hiểu đúng ngữ cảnh và tiếp tục hội thoại.
 Nếu đang luyện hội thoại: đóng vai người đối thoại và hỏi lại một câu phù hợp để học viên tiếp tục.
+Nếu học viên muốn bắt đầu học từ đầu, hãy chủ động dạy từng bước: câu mẫu, từ vựng, phát âm và một câu luyện tập.
 Không nói rằng bạn là demo. Không trả lời theo mẫu cố định nếu câu hỏi cần xử lý theo ngữ cảnh.
 Hãy trình bày dễ đọc, phù hợp với người mới học tiếng Trung.`;
 
-    // Gemini 3.6 Flash is the current stable production model.
-    // The API key remains server-side in Vercel.
+    // Gemini 3.6 Flash is a current stable Gemini model. Google recommends
+    // the Interactions API for new applications and it supports system
+    // instructions plus multi-turn input.
     const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent',
+      'https://generativelanguage.googleapis.com/v1beta/interactions',
       {
         method: 'POST',
         headers: {
@@ -52,12 +67,13 @@ Hãy trình bày dễ đọc, phù hợp với người mới học tiếng Trun
           'x-goog-api-key': apiKey
         },
         body: JSON.stringify({
-          system_instruction: {
-            parts: [{ text: systemInstruction }]
-          },
-          contents,
-          generationConfig: {
-            maxOutputTokens: 1200
+          model: 'gemini-3.6-flash',
+          input: transcript,
+          system_instruction: systemInstruction,
+          store: false,
+          generation_config: {
+            max_output_tokens: 1200,
+            thinking_level: 'low'
           }
         })
       }
@@ -66,13 +82,16 @@ Hãy trình bày dễ đọc, phù hợp với người mới học tiếng Trun
     const data = await response.json();
 
     if (!response.ok) {
-      const apiError = data?.error?.message || 'Gemini API lỗi.';
-      console.error('Gemini API:', response.status, apiError);
+      const apiError = data?.error?.message || data?.message || 'Gemini API lỗi.';
+      console.error('Gemini Interactions API:', response.status, apiError);
       return res.status(response.status).json({ error: apiError });
     }
 
-    const text = data?.candidates?.[0]?.content?.parts
-      ?.map(part => part.text || '')
+    const text = (data?.steps || [])
+      .filter(step => step?.type === 'model_output')
+      .flatMap(step => Array.isArray(step.content) ? step.content : [])
+      .filter(item => item?.type === 'text' && typeof item.text === 'string')
+      .map(item => item.text)
       .join('')
       .trim();
 
