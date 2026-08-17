@@ -5,8 +5,48 @@ function save(){localStorage.setItem('lh_points',state.points);localStorage.setI
 function toast(t){const x=$('#toast');if(!x)return;x.textContent=t;x.classList.add('show');setTimeout(()=>x.classList.remove('show'),2200)}
 function go(page){state.page=page;document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id===page));document.querySelectorAll('.nav button').forEach(x=>x.classList.toggle('active',x.dataset.page===page));$('#pageTitle').textContent=pages[page];if(page==='vocab')renderVocab();if(page==='speak')renderFlash();if(page==='progress')renderProgress();if(page==='chat')restoreChat();$('#sidebar').classList.remove('open');window.scrollTo({top:0,behavior:'smooth'})}window.go=go;window.toast=toast;
 function addPoints(n){state.points+=n;save();if($('#points'))$('#points').textContent=state.points.toLocaleString('vi-VN');toast(`+${n} điểm học tập`)}
-function speak(text){if(!text||text==='—')return;if(!('speechSynthesis'in window)){toast('Trình duyệt chưa hỗ trợ phát âm');return}speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';u.rate=.78;speechSynthesis.speak(u)}window.speak=speak;
-function renderFlash(){const w=window.ALL_VOCAB[state.vocabIndex%window.ALL_VOCAB.length];$('#flash').innerHTML=`<div class="word">${w.hanzi}</div><div class="pinyin">${w.pinyin}</div><div class="meaning">${w.meaning}</div><button class="mic" id="tts">🔊</button><div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="btn soft" id="prevWord">← Trước</button><button class="btn green" id="knowWord">Tôi đã nhớ ✓</button><button class="btn soft" id="nextWord">Tiếp →</button></div><div class="notice" style="margin-top:15px">Chủ đề: ${w.topic} · HSK ${w.hsk}</div>`;$('#tts').onclick=()=>speak(w.hanzi);$('#nextWord').onclick=()=>{state.vocabIndex++;renderFlash()};$('#prevWord').onclick=()=>{state.vocabIndex=Math.max(0,state.vocabIndex-1);renderFlash()};$('#knowWord').onclick=()=>{state.learned.add(w.hanzi);addPoints(10);state.vocabIndex++;renderFlash();updateStats()}}
+
+// Chinese pronunciation: use the phone's native TTS first. If the mobile
+// browser does not expose speechSynthesis/Chinese voices, automatically fall
+// back to Gemini TTS through our secure Vercel backend.
+let ttsAudio=null;
+function getChineseVoice(){
+  if(!('speechSynthesis' in window))return null;
+  const voices=speechSynthesis.getVoices()||[];
+  return voices.find(v=>/^(zh|cmn)(-|_|$)/i.test(v.lang)) || voices.find(v=>/chinese|mandarin|中文|普通话/i.test(v.name)) || null;
+}
+async function speakWithGemini(text){
+  const r=await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(data.error||`TTS server lỗi (${r.status})`);
+  if(!data.audioBase64)throw new Error('Không nhận được dữ liệu âm thanh');
+  if(ttsAudio){try{ttsAudio.pause()}catch(_){};ttsAudio=null}
+  ttsAudio=new Audio(`data:${data.mimeType||'audio/wav'};base64,${data.audioBase64}`);
+  ttsAudio.setAttribute('playsinline','true');
+  await ttsAudio.play();
+}
+async function speak(text){
+  if(!text||text==='—')return;
+  try{
+    const voice=getChineseVoice();
+    if(voice){
+      speechSynthesis.cancel();
+      const u=new SpeechSynthesisUtterance(text);
+      u.voice=voice;u.lang=voice.lang||'zh-CN';u.rate=.78;u.pitch=1;
+      speechSynthesis.speak(u);
+      return;
+    }
+    // Some Android/iOS browsers expose speechSynthesis but no Chinese voice.
+    // In that case use the server-side Gemini TTS fallback.
+    await speakWithGemini(text);
+  }catch(e){
+    try{await speakWithGemini(text)}catch(e2){toast('Không phát được âm thanh. Hãy kiểm tra âm lượng và thử lại.')} 
+  }
+}
+window.speak=speak;
+if('speechSynthesis'in window){speechSynthesis.onvoiceschanged=()=>{};setTimeout(()=>speechSynthesis.getVoices(),300)}
+
+function renderFlash(){const w=window.ALL_VOCAB[state.vocabIndex%window.ALL_VOCAB.length];$('#flash').innerHTML=`<div class="word">${w.hanzi}</div><div class="pinyin">${w.pinyin}</div><div class="meaning">${w.meaning}</div><button class="mic" id="tts">🔊 Nghe phát âm</button><div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="btn soft" id="prevWord">← Trước</button><button class="btn green" id="knowWord">Tôi đã nhớ ✓</button><button class="btn soft" id="nextWord">Tiếp →</button></div><div class="notice" style="margin-top:15px">Chủ đề: ${w.topic} · HSK ${w.hsk}</div>`;$('#tts').onclick=()=>speak(w.hanzi);$('#nextWord').onclick=()=>{state.vocabIndex++;renderFlash()};$('#prevWord').onclick=()=>{state.vocabIndex=Math.max(0,state.vocabIndex-1);renderFlash()};$('#knowWord').onclick=()=>{state.learned.add(w.hanzi);addPoints(10);state.vocabIndex++;renderFlash();updateStats()}}
 function updateStats(){const n=state.learned.size;if($('#wordsCount'))$('#wordsCount').textContent=n.toLocaleString('vi-VN')}
 function renderVocab(){const q=($('#vocabSearch')?.value||'').trim().toLowerCase(),h=$('#hskFilter')?.value||'all',topic=$('#topicFilter')?.value||'all';const rows=window.ALL_VOCAB.filter(w=>(h==='all'||String(w.hsk)===h)&&(topic==='all'||w.topic===topic)&&(!q||`${w.hanzi} ${w.pinyin} ${w.meaning}`.toLowerCase().includes(q))).slice(0,500);$('#vocabBody').innerHTML=rows.map(w=>`<tr><td class="hanzi">${w.hanzi}</td><td>${w.pinyin}</td><td>${w.meaning}</td><td>HSK ${w.hsk}</td><td><button class="btn soft" onclick="speak('${w.hanzi}')">🔊</button><button class="btn green" onclick="learnWord('${w.hanzi}')">✓</button></td></tr>`).join('')||'<tr><td colspan="5">Không tìm thấy từ phù hợp.</td></tr>';$('#vocabCount').textContent=`Hiển thị ${rows.length} từ`}
 window.learnWord=h=>{state.learned.add(h);addPoints(5);updateStats();renderVocab()};
@@ -44,23 +84,14 @@ async function sendChat(){
         if(!raw)continue;
         let data;try{data=JSON.parse(raw)}catch(_){continue}
         if(data.error)throw new Error(data.error);
-        if(data.text){
-          reply+=data.text;
-          loading.textContent=reply;
-          $('#messages').scrollTop=$('#messages').scrollHeight;
-          if(!firstToken){firstToken=true;loading.dataset.firstTokenMs=Math.round(performance.now()-started)}
-        }
+        if(data.text){reply+=data.text;loading.textContent=reply;$('#messages').scrollTop=$('#messages').scrollHeight;if(!firstToken){firstToken=true;loading.dataset.firstTokenMs=Math.round(performance.now()-started)}}
         if(data.done)done=true;
       }
     }
     if(!reply)throw new Error('AI không trả về nội dung');
-    state.chatHistory.push({role:'assistant',text:reply});
-    save();
-  }catch(e){
-    loading.textContent='⚠️ Không kết nối được Gemini: '+e.message;
-    state.chatHistory.push({role:'assistant',text:loading.textContent});
-    save();
-  }finally{$('#chatSend').disabled=false;input.focus()}
+    state.chatHistory.push({role:'assistant',text:reply});save();
+  }catch(e){loading.textContent='⚠️ Không kết nối được Gemini: '+e.message;state.chatHistory.push({role:'assistant',text:loading.textContent});save()}
+  finally{$('#chatSend').disabled=false;input.focus()}
 }
 function addBubble(text,me){const b=document.createElement('div');b.className='bubble '+(me?'me':'bot');b.textContent=text;$('#messages').appendChild(b);$('#messages').scrollTop=$('#messages').scrollHeight;return b}
 function setupSpeech(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){$('#speechStatus').textContent='Trình duyệt chưa hỗ trợ nhận diện giọng nói.';return}const r=new SR();r.lang='zh-CN';r.interimResults=true;r.continuous=false;r.onstart=()=>$('#speechStatus').textContent='Đang nghe… hãy nói trọn câu rồi dừng';r.onresult=e=>{let s='';for(let i=e.resultIndex;i<e.results.length;i++)s+=e.results[i][0].transcript;$('#speechResult').textContent=s};r.onerror=e=>$('#speechStatus').textContent='Lỗi nhận diện: '+e.error;r.onend=()=>{const s=$('#speechResult').textContent.trim();$('#speechStatus').textContent=s?'Đã nhận đủ câu.':'Sẵn sàng luyện nói';if(s)addPoints(5)};$('#recordBtn').onclick=()=>{try{r.start()}catch(e){r.stop()}}}
