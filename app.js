@@ -15,7 +15,53 @@ function newQuiz(){const base=window.ALL_VOCAB[Math.floor(Math.random()*window.A
 function renderProgress(){const total=window.ALL_VOCAB.length,learned=state.learned.size,pct=Math.min(100,Math.round(learned/total*100));$('#progressPct').textContent=pct+'%';$('#progressBar').style.width=pct+'%';$('#learnedTotal').textContent=learned;$('#totalWords').textContent=total;$('#pointsProgress').textContent=state.points.toLocaleString('vi-VN')}
 const AI_API_URL='/api/chat';
 function restoreChat(){const box=$('#messages');if(!box)return;box.innerHTML='';if(!state.chatHistory.length){addBubble('你好！我是莲花中文老师。 Tôi là AI Giáo viên tiếng Trung của Liên Hoa. Hãy nhập câu bất kỳ bằng tiếng Việt hoặc tiếng Trung.',false);return}state.chatHistory.slice(-20).forEach(m=>addBubble(m.text,m.role==='user'))}
-async function sendChat(){const input=$('#chatInput'),text=input.value.trim();if(!text)return;addBubble(text,true);const previousHistory=state.chatHistory.slice(-12);state.chatHistory.push({role:'user',text});input.value='';const loading=addBubble('🤖 AI đang suy nghĩ…',false);$('#chatSend').disabled=true;try{const r=await fetch(AI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,history:previousHistory,mode:'chinese-teacher'})});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.error||`AI server lỗi (${r.status})`);const reply=data.reply||data.text;if(!reply)throw new Error('AI không trả về nội dung');loading.textContent=reply;state.chatHistory.push({role:'assistant',text:reply});save()}catch(e){loading.textContent='⚠️ Chưa kết nối được Gemini: '+e.message;state.chatHistory.push({role:'assistant',text:loading.textContent});save()}finally{$('#chatSend').disabled=false}}
+async function sendChat(){
+  const input=$('#chatInput'),text=input.value.trim();
+  if(!text)return;
+  addBubble(text,true);
+  const previousHistory=state.chatHistory.slice(-6);
+  state.chatHistory.push({role:'user',text});
+  input.value='';
+  const loading=addBubble('🤖 ',false);
+  $('#chatSend').disabled=true;
+  const started=performance.now();
+  try{
+    const r=await fetch(AI_API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,history:previousHistory,mode:'chinese-teacher'})});
+    if(!r.ok){const data=await r.json().catch(()=>({}));throw new Error(data.error||`AI server lỗi (${r.status})`)}
+    if(!r.body)throw new Error('Trình duyệt không hỗ trợ streaming');
+    const reader=r.body.getReader(),decoder=new TextDecoder();
+    let buffer='',reply='',firstToken=false,done=false;
+    while(!done){
+      const {value,done:readerDone}=await reader.read();
+      if(readerDone)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const events=buffer.split('\n\n');
+      buffer=events.pop()||'';
+      for(const event of events){
+        const line=event.split('\n').find(x=>x.startsWith('data:'));
+        if(!line)continue;
+        const raw=line.slice(5).trim();
+        if(!raw)continue;
+        let data;try{data=JSON.parse(raw)}catch(_){continue}
+        if(data.error)throw new Error(data.error);
+        if(data.text){
+          reply+=data.text;
+          loading.textContent=reply;
+          $('#messages').scrollTop=$('#messages').scrollHeight;
+          if(!firstToken){firstToken=true;loading.dataset.firstTokenMs=Math.round(performance.now()-started)}
+        }
+        if(data.done)done=true;
+      }
+    }
+    if(!reply)throw new Error('AI không trả về nội dung');
+    state.chatHistory.push({role:'assistant',text:reply});
+    save();
+  }catch(e){
+    loading.textContent='⚠️ Không kết nối được Gemini: '+e.message;
+    state.chatHistory.push({role:'assistant',text:loading.textContent});
+    save();
+  }finally{$('#chatSend').disabled=false;input.focus()}
+}
 function addBubble(text,me){const b=document.createElement('div');b.className='bubble '+(me?'me':'bot');b.textContent=text;$('#messages').appendChild(b);$('#messages').scrollTop=$('#messages').scrollHeight;return b}
 function setupSpeech(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){$('#speechStatus').textContent='Trình duyệt chưa hỗ trợ nhận diện giọng nói.';return}const r=new SR();r.lang='zh-CN';r.interimResults=true;r.continuous=false;r.onstart=()=>$('#speechStatus').textContent='Đang nghe… hãy nói trọn câu rồi dừng';r.onresult=e=>{let s='';for(let i=e.resultIndex;i<e.results.length;i++)s+=e.results[i][0].transcript;$('#speechResult').textContent=s};r.onerror=e=>$('#speechStatus').textContent='Lỗi nhận diện: '+e.error;r.onend=()=>{const s=$('#speechResult').textContent.trim();$('#speechStatus').textContent=s?'Đã nhận đủ câu.':'Sẵn sàng luyện nói';if(s)addPoints(5)};$('#recordBtn').onclick=()=>{try{r.start()}catch(e){r.stop()}}}
 document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>go(b.dataset.page));$('#menuBtn').onclick=()=>$('#sidebar').classList.toggle('open');$('#chatSend').onclick=sendChat;$('#chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat()}});$('#vocabSearch').oninput=renderVocab;$('#hskFilter').onchange=renderVocab;$('#topicFilter').onchange=renderVocab;buildFilters();updateStats();$('#points').textContent=state.points.toLocaleString('vi-VN');renderFlash();newQuiz();setupSpeech();renderProgress();restoreChat();go('home')});
